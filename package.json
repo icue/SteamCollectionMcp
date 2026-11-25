@@ -1,6 +1,6 @@
 {
   "name": "steam-collection-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A lightweight, stateless, read-only MCP server for querying your Steam game library and wishlist, with multilingual game name resolution.",
   "type": "module",
   "license": "BSD-3-Clause",
