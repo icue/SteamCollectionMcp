@@ -19,8 +19,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:live": "vitest run --config vitest.live.config.ts",
-    "start": "node dist/index.js",
-    "prepack": "npm run build"
+    "start": "node dist/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",
@@ -31,23 +30,5 @@
     "@types/node": "22.13.14",
     "typescript": "7.0.2",
     "vitest": "5.1.1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/icue/SteamCollectionMcp.git"
-  },
-  "homepage": "https://github.com/icue/SteamCollectionMcp#readme",
-  "bugs": {
-    "url": "https://github.com/icue/SteamCollectionMcp/issues"
-  },
-  "keywords": [
-    "mcp",
-    "modelcontextprotocol",
-    "steam",
-    "steam-library",
-    "steam-wishlist"
-  ],
-  "publishConfig": {
-    "access": "public"
   }
 }
