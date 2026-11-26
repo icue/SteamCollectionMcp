@@ -71,6 +71,7 @@ async function connectInMemory(
   options?: {
     configOverrides?: Partial<ServerConfig>;
     useRealClock?: boolean;
+    maxRetries?: number;
   },
 ) {
   const config = makeConfig(options?.configOverrides);
@@ -112,6 +113,7 @@ async function connectInMemory(
   const server = createSteamCollectionServer(config, {
     fetchFn,
     ...(options?.useRealClock ? {} : { now: () => tick, sleep: async () => {} }),
+    ...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
     baseRetryDelayMs: 1,
   });
 
@@ -2266,6 +2268,9 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
 
     // 1d. Partial collection fallback consumes healthy wishlist (or healthy owned) immediately while peer hangs,
     //     preserving candidate evidence and confirmed source membership without fabricating top-level identity.
+    //     Uses maxRetries=0 because this scenario verifies cross-source parallelism, in-flight sharing, and partial
+    //     evidence (retry behavior is covered separately in 1c safety and HTTP client tests); with baseRetryDelayMs=1
+    //     and real timers, a hanging timeout can wake a few ms before toolTimeoutMs and legitimately issue attempt 2.
     for (const slowSource of ['owned', 'wishlist'] as const) {
       let active = 0;
       let peak = 0;
@@ -2297,7 +2302,11 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
             active--;
           }
         },
-        { configOverrides: { httpTimeoutMs: 200, toolTimeoutMs: 200, maxConcurrency: 2 }, useRealClock: true },
+        {
+          configOverrides: { httpTimeoutMs: 200, toolTimeoutMs: 200, maxConcurrency: 2 },
+          useRealClock: true,
+          maxRetries: 0,
+        },
       );
       try {
         const raw = await conn.client.callTool({
@@ -2476,6 +2485,8 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
         {
           configOverrides: { httpTimeoutMs: 260, toolTimeoutMs: 260, maxConcurrency: 2, metadataBatchSize: 1 },
           useRealClock: true,
+          // Verify single shared in-flight GetItems([10]) without wall-clock timeout-retry sensitivity (baseRetryDelayMs=1)
+          maxRetries: 0,
         },
       );
       try {
@@ -2547,6 +2558,8 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
         {
           configOverrides: { httpTimeoutMs: 240, toolTimeoutMs: 240, maxConcurrency: 2, metadataBatchSize: 1 },
           useRealClock: true,
+          // Verify single shared in-flight GetItems([10]) without wall-clock timeout-retry sensitivity (baseRetryDelayMs=1)
+          maxRetries: 0,
         },
       );
       try {
@@ -3013,6 +3026,8 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
             metadataBatchSize: 1,
           },
           useRealClock: true,
+          // Verify single shared in-flight GetItems([10]) without wall-clock timeout-retry sensitivity (baseRetryDelayMs=1)
+          maxRetries: 0,
         },
       );
 
