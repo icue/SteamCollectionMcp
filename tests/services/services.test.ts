@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '../../src/config.js';
 import { SteamHttpClient } from '../../src/clients/http.js';
 import { SteamApiClient } from '../../src/clients/steam.js';
-import { LibraryService } from '../../src/services/library.js';
+import {
+  deduplicateAndSortOwned,
+  LibraryService,
+  sortOwnedGamesByLastPlayed,
+  sortOwnedGamesByPlaytime,
+} from '../../src/services/library.js';
 import { MetadataService } from '../../src/services/metadata.js';
 import { GameResolverService, type ResolverBudgetOptions } from '../../src/services/resolver.js';
 import { handleListOwnedGames, handleListWishlistGames } from '../../src/tools/lists.js';
@@ -195,6 +200,132 @@ describe('LibraryService, MetadataService, and list tools', () => {
     expect(second.output.total).toBe(1);
     expect(second.output.games.map((g) => g.appid)).toEqual([413150]);
     expect(second.output.fetched_at).not.toBe(first.output.fetched_at);
+  });
+
+  it('merges duplicate AppIDs keeping newer valid lastPlayedAt while preserving name/playtime merge and canonical AppID scope order', async () => {
+    const deduped = deduplicateAndSortOwned([
+      { appid: 300, name: 'Older Entry', playtimeForever: 100, lastPlayedAt: 1_700_000_100 },
+      { appid: 300, name: 'Newer Entry', playtimeForever: 250, lastPlayedAt: 1_700_000_900 },
+      { appid: 100, name: null, playtimeForever: null, lastPlayedAt: 1_700_000_800 },
+      { appid: 100, name: 'Filled Name', playtimeForever: 40, lastPlayedAt: 1_700_000_200 },
+      { appid: 200, name: 'Null Then Valid', playtimeForever: 9999, lastPlayedAt: null },
+      { appid: 200, name: 'Ignored', playtimeForever: 1, lastPlayedAt: 1_700_000_500 },
+      { appid: 400, name: 'Valid Then Null', playtimeForever: 10, lastPlayedAt: 1_700_000_500 },
+      { appid: 400, name: 'Ignored 2', playtimeForever: 20, lastPlayedAt: null },
+      { appid: 50, name: 'Never Played High Playtime', playtimeForever: 50_000, lastPlayedAt: null },
+    ]);
+
+    expect(deduped).toEqual([
+      { appid: 50, name: 'Never Played High Playtime', playtimeForever: 50_000, lastPlayedAt: null },
+      { appid: 100, name: 'Filled Name', playtimeForever: 40, lastPlayedAt: 1_700_000_800 },
+      { appid: 200, name: 'Null Then Valid', playtimeForever: 9999, lastPlayedAt: 1_700_000_500 },
+      { appid: 300, name: 'Older Entry', playtimeForever: 100, lastPlayedAt: 1_700_000_900 },
+      { appid: 400, name: 'Valid Then Null', playtimeForever: 10, lastPlayedAt: 1_700_000_500 },
+    ]);
+
+    const byLastPlayed = sortOwnedGamesByLastPlayed(deduped);
+    expect(byLastPlayed.map((g) => g.appid)).toEqual([300, 100, 200, 400, 50]);
+    // Must not mutate the canonical AppID-ordered array
+    expect(deduped.map((g) => g.appid)).toEqual([50, 100, 200, 300, 400]);
+
+    // Also verify ToolCallScope cached owned list stays in canonical AppID order after sorting
+    const h = createHarness((url) => {
+      if (url.pathname.endsWith('/GetOwnedGames/v1/')) {
+        return jsonResp({
+          response: {
+            game_count: 3,
+            games: [
+              { appid: 10, name: 'Oldest', playtime_forever: 900, rtime_last_played: 1_700_000_100 },
+              { appid: 30, name: 'Newest', playtime_forever: 10, rtime_last_played: 1_700_000_900 },
+              { appid: 20, name: 'Unplayed', playtime_forever: 5000, rtime_last_played: 0 },
+            ],
+          },
+        });
+      }
+      return jsonResp({}, 404);
+    });
+
+    const scope = h.library.createScope();
+    const firstRead = await h.library.getOwnedList(scope, { includeAppInfo: false });
+    expect(firstRead.ok).toBe(true);
+    if (!firstRead.ok) return;
+    expect(firstRead.data.games.map((g) => g.appid)).toEqual([10, 20, 30]);
+    expect(sortOwnedGamesByLastPlayed(firstRead.data.games).map((g) => g.appid)).toEqual([30, 10, 20]);
+    const secondRead = await h.library.getOwnedList(scope, { includeAppInfo: false });
+    expect(secondRead.ok).toBe(true);
+    if (!secondRead.ok) return;
+    expect(secondRead.data.games.map((g) => g.appid)).toEqual([10, 20, 30]);
+  });
+
+  it('sorts owned games by playtime asc/desc with 0 valid, missing last, AppID ties, preserved duplicate merge, and immutable canonical scope order', async () => {
+    const deduped = deduplicateAndSortOwned([
+      { appid: 600, name: 'Zero High', playtimeForever: 0, lastPlayedAt: null },
+      { appid: 150, name: 'Zero Low', playtimeForever: 0, lastPlayedAt: 1_700_000_900 },
+      { appid: 400, name: 'Dup Zero Kept', playtimeForever: 0, lastPlayedAt: null },
+      { appid: 400, name: 'Dup Ignored 999', playtimeForever: 999, lastPlayedAt: null },
+      { appid: 300, name: 'Dup Null Filled', playtimeForever: null, lastPlayedAt: null },
+      { appid: 300, name: 'Dup Fill 120', playtimeForever: 120, lastPlayedAt: null },
+      { appid: 200, name: 'Tie 120 Low', playtimeForever: 120, lastPlayedAt: null },
+      { appid: 500, name: 'Tie 120 High', playtimeForever: 120, lastPlayedAt: null },
+      { appid: 700, name: 'Missing High', playtimeForever: null, lastPlayedAt: null },
+      { appid: 350, name: 'Missing Low', playtimeForever: null, lastPlayedAt: null },
+      { appid: 350, name: 'Missing Still Null', playtimeForever: null, lastPlayedAt: null },
+      { appid: 900, name: 'Longest', playtimeForever: 5_000, lastPlayedAt: null },
+    ]);
+
+    expect(deduped.map((g) => [g.appid, g.playtimeForever])).toEqual([
+      [150, 0],
+      [200, 120],
+      [300, 120],
+      [350, null],
+      [400, 0],
+      [500, 120],
+      [600, 0],
+      [700, null],
+      [900, 5_000],
+    ]);
+
+    expect(sortOwnedGamesByPlaytime(deduped, 'asc').map((g) => g.appid)).toEqual([
+      150, 400, 600, 200, 300, 500, 900, 350, 700,
+    ]);
+    expect(sortOwnedGamesByPlaytime(deduped, 'desc').map((g) => g.appid)).toEqual([
+      900, 200, 300, 500, 150, 400, 600, 350, 700,
+    ]);
+    // Must not mutate canonical AppID-ordered array
+    expect(deduped.map((g) => g.appid)).toEqual([150, 200, 300, 350, 400, 500, 600, 700, 900]);
+
+    // ToolCallScope cached owned list remains in canonical AppID order after sorting in both directions
+    const h = createHarness((url) => {
+      if (url.pathname.endsWith('/GetOwnedGames/v1/')) {
+        return jsonResp({
+          response: {
+            game_count: 3,
+            games: [
+              { appid: 30, name: 'Zero', playtime_forever: 0 },
+              { appid: 10, name: 'Missing' },
+              { appid: 20, name: 'Played', playtime_forever: 50 },
+            ],
+          },
+        });
+      }
+      return jsonResp({}, 404);
+    });
+
+    const scope = h.library.createScope();
+    const firstRead = await h.library.getOwnedList(scope, { includeAppInfo: false });
+    expect(firstRead.ok).toBe(true);
+    if (!firstRead.ok) return;
+    expect(firstRead.data.games.map((g) => g.appid)).toEqual([10, 20, 30]);
+    expect(sortOwnedGamesByPlaytime(firstRead.data.games, 'asc').map((g) => g.appid)).toEqual([
+      30, 20, 10,
+    ]);
+    expect(sortOwnedGamesByPlaytime(firstRead.data.games, 'desc').map((g) => g.appid)).toEqual([
+      20, 30, 10,
+    ]);
+    const secondRead = await h.library.getOwnedList(scope, { includeAppInfo: false });
+    expect(secondRead.ok).toBe(true);
+    if (!secondRead.ok) return;
+    expect(secondRead.data.games.map((g) => g.appid)).toEqual([10, 20, 30]);
   });
 });
 

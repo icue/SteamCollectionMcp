@@ -19,6 +19,7 @@ export interface OwnedGameRecord {
   readonly appid: number;
   readonly name: string | null;
   readonly playtimeForever: number | null;
+  readonly lastPlayedAt: number | null;
 }
 
 export interface OwnedGamesResult {
@@ -204,6 +205,7 @@ export class SteamApiClient {
       name: typeof item.name === 'string' && item.name.trim().length > 0 ? item.name : null,
       playtimeForever:
         typeof item.playtime_forever === 'number' ? item.playtime_forever : null,
+      lastPlayedAt: item.rtime_last_played ?? null,
     }));
 
     return {

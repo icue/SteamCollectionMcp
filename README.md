@@ -72,13 +72,13 @@ In the client configuration above, change `command` to `node` and `args` to `["/
 
 | Tool | Purpose |
 | --- | --- |
-| `list_owned_games` | List owned games in AppID order |
+| `list_owned_games` | List owned games in AppID order (default), by last-played time, or by total playtime |
 | `list_wishlist_games` | List the public wishlist in priority order |
 | `resolve_game` | Identify a game by title, AppID, or Steam Store app URL |
 | `get_game_status` | Check ownership and wishlist status for one game |
 | `get_games_status` | Check up to 50 games in one call, preserving the input order and original query strings |
 
-The list tools use `offset` (default `0`) and `limit` (default `100`, maximum `500`). Set `include_metadata` to `false` to skip store metadata. Each page is read live, so use AppIDs to deduplicate results across pages if the collection changes.
+The list tools use `offset` (default `0`) and `limit` (default `100`, maximum `500`). For `list_owned_games`, set `sort_by` to `"appid"` (default), `"last_played"` (newest to oldest), `"playtime_asc"` (shortest to longest cumulative minutes), or `"playtime_desc"` (longest to shortest); `0` is a valid playtime, missing values are placed last, and ties break by AppID ascending. Set `include_metadata` to `false` to skip store metadata. Each page is read live, so use AppIDs to deduplicate results across pages if the collection changes.
 
 Use `language` and `alternative_names` to help resolve localized titles. Ambiguous titles return candidates. If identity is unresolved or a Steam source is unavailable, affected ownership or wishlist values are `null`.
 

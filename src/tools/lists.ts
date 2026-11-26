@@ -1,3 +1,4 @@
+import type { OwnedGameRecord } from '../clients/steam.js';
 import type { ServerConfig } from '../config.js';
 import {
   ListOwnedGamesOutputSchema,
@@ -8,9 +9,15 @@ import {
   type ListOwnedGamesOutput,
   type ListWishlistGamesOutput,
   type OwnedGameItem,
+  type OwnedGamesSortBy,
   type WishlistGameItem,
 } from '../schemas.js';
-import { paginateList, type LibraryService } from '../services/library.js';
+import {
+  paginateList,
+  sortOwnedGamesByLastPlayed,
+  sortOwnedGamesByPlaytime,
+  type LibraryService,
+} from '../services/library.js';
 import type { MetadataService } from '../services/metadata.js';
 import { buildStoreUrl } from '../utils/identity.js';
 import { resolveSteamLanguage } from '../utils/languages.js';
@@ -33,9 +40,29 @@ export type ListToolResult<T> =
   | { readonly ok: true; readonly output: T }
   | { readonly ok: false; readonly error: ListToolErrorPayload };
 
+export type ListOwnedGamesHandlerInput = ListGamesInput & {
+  readonly sort_by?: OwnedGamesSortBy;
+};
+
+function orderOwnedGames(
+  games: readonly OwnedGameRecord[],
+  sortBy: OwnedGamesSortBy,
+): readonly OwnedGameRecord[] {
+  switch (sortBy) {
+    case 'appid':
+      return games;
+    case 'last_played':
+      return sortOwnedGamesByLastPlayed(games);
+    case 'playtime_asc':
+      return sortOwnedGamesByPlaytime(games, 'asc');
+    case 'playtime_desc':
+      return sortOwnedGamesByPlaytime(games, 'desc');
+  }
+}
+
 export async function handleListOwnedGames(
   deps: ListToolDeps,
-  input: ListGamesInput,
+  input: ListOwnedGamesHandlerInput,
   signal?: AbortSignal,
 ): Promise<ListToolResult<ListOwnedGamesOutput>> {
   const scope = deps.library.createScope(signal);
@@ -64,7 +91,9 @@ export async function handleListOwnedGames(
     };
   }
 
-  const page = paginateList(ownedRes.data.games, input.offset, input.limit);
+  const sortBy = input.sort_by ?? 'appid';
+  const orderedGames = orderOwnedGames(ownedRes.data.games, sortBy);
+  const page = paginateList(orderedGames, input.offset, input.limit);
 
   if (!input.include_metadata) {
     const games: OwnedGameItem[] = page.items.map((item) => ({

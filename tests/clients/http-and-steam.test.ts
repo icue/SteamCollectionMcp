@@ -746,6 +746,65 @@ describe('SteamApiClient strict response validation', () => {
     ).rejects.toMatchObject({ errorCode: 'invalid_response' });
   });
 
+  it('parses valid uint32 rtime_last_played and tolerates missing, zero, or malformed values without failing or dropping games', async () => {
+    const cfg = makeTestConfig();
+    const ctx = { deadlineMs: Date.now() + 30_000 };
+
+    const makeClient = (payload: unknown) => {
+      const http = new SteamHttpClient({
+        httpTimeoutMs: 5_000,
+        maxConcurrency: 2,
+        secrets: [cfg.steamApiKey],
+        fetchFn: async () => jsonResponse(payload),
+      });
+      return new SteamApiClient(http, cfg);
+    };
+
+    const res = await makeClient({
+      response: {
+        game_count: 11,
+        games: [
+          { appid: 1, name: 'Min Valid', playtime_forever: 10, rtime_last_played: 1 },
+          { appid: 2, name: 'Max Uint32', playtime_forever: 20, rtime_last_played: 4_294_967_295 },
+          { appid: 3, name: 'Missing', playtime_forever: 500 },
+          { appid: 4, name: 'Zero', playtime_forever: 600, rtime_last_played: 0 },
+          { appid: 5, name: 'Negative', playtime_forever: 700, rtime_last_played: -1 },
+          { appid: 6, name: 'Float', playtime_forever: 800, rtime_last_played: 1_700_000_000.5 },
+          { appid: 7, name: 'Overflow', playtime_forever: 900, rtime_last_played: 4_294_967_296 },
+          { appid: 8, name: 'String', playtime_forever: 1000, rtime_last_played: '1700000000' },
+          { appid: 9, name: 'Null', playtime_forever: 1100, rtime_last_played: null },
+          { appid: 10, name: 'Boolean', playtime_forever: 1200, rtime_last_played: true },
+          { appid: 11, name: 'Object', playtime_forever: 1300, rtime_last_played: { ts: 1700000000 } },
+        ],
+      },
+    }).getOwnedGames(ctx, { includeAppInfo: true });
+
+    expect(res.games).toHaveLength(11);
+    expect(res.games.map((g) => [g.appid, g.lastPlayedAt])).toEqual([
+      [1, 1],
+      [2, 4_294_967_295],
+      [3, null],
+      [4, null],
+      [5, null],
+      [6, null],
+      [7, null],
+      [8, null],
+      [9, null],
+      [10, null],
+      [11, null],
+    ]);
+
+    // Strict validation on core fields still rejects malformed appid or negative playtime_forever
+    await expect(
+      makeClient({
+        response: {
+          game_count: 1,
+          games: [{ appid: 1, playtime_forever: -5, rtime_last_played: 1_700_000_000 }],
+        },
+      }).getOwnedGames(ctx, { includeAppInfo: false }),
+    ).rejects.toMatchObject({ errorCode: 'invalid_response' });
+  });
+
   it('validates GetWishlist explicit empty array vs unconfirmable missing items', async () => {
     const cfg = makeTestConfig();
     const ctx = { deadlineMs: Date.now() + 30_000 };

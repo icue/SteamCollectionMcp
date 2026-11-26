@@ -129,6 +129,26 @@ describe('Real subprocess stdio E2E against built dist/index.js', () => {
         expect(tool.annotations?.readOnlyHint).toBe(true);
         expect(tool.outputSchema).toBeDefined();
       }
+      const toolsByName = new Map(tools.map((t) => [t.name, t]));
+      const ownedSortProp = (
+        toolsByName.get('list_owned_games')?.inputSchema.properties as Record<
+          string,
+          Record<string, unknown>
+        >
+      )?.['sort_by'];
+      expect(ownedSortProp).toMatchObject({
+        type: 'string',
+        enum: ['appid', 'last_played', 'playtime_asc', 'playtime_desc'],
+        default: 'appid',
+      });
+      expect(String(ownedSortProp?.['description'] ?? '')).toMatch(/minutes/i);
+      expect(String(ownedSortProp?.['description'] ?? '')).toMatch(/missing\/null/i);
+      expect(String(ownedSortProp?.['description'] ?? '')).toMatch(/AppID ascending/i);
+      expect(
+        (toolsByName.get('list_wishlist_games')?.inputSchema.properties as Record<string, unknown>)[
+          'sort_by'
+        ],
+      ).toBeUndefined();
 
       // 1. list_owned_games
       const owned = ListOwnedGamesOutputSchema.parse(
@@ -608,6 +628,186 @@ describe('Real subprocess stdio E2E against built dist/index.js', () => {
       expect(blankAlt.isError).toBe(true);
 
       expect(stderrChunks.join('')).not.toContain(TEST_STEAM_API_KEY);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('supports list_owned_games sort_by appid and last_played with pagination over real stdio', async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['--import', PRELOAD_SCRIPT, DIST_ENTRY],
+      env: {
+        PATH: process.env['PATH'] ?? '',
+        STEAM_API_KEY: TEST_STEAM_API_KEY,
+        STEAM_ID: TEST_STEAM_ID,
+        STEAM_COUNTRY: 'US',
+        STEAM_LANGUAGE: 'english',
+        E2E_MOCK_MODE: 'owned_sort',
+      },
+      stderr: 'pipe',
+    });
+
+    const client = new Client({ name: 'stdio-e2e-sort-client', version: '0.1.0' });
+    await client.connect(transport);
+    try {
+      // Default and explicit appid order
+      const defaultOwned = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(defaultOwned.total).toBe(6);
+      expect(defaultOwned.games.map((g) => g.appid)).toEqual([
+        10, 1086940, 1091500, 1145350, 1145360, 1245620,
+      ]);
+
+      const explicitAppId = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'appid', include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(explicitAppId.games.map((g) => g.appid)).toEqual(
+        defaultOwned.games.map((g) => g.appid),
+      );
+
+      // last_played order: 1091500 (deduped 1700000900), tie 1700000500 (1086940 < 1145360),
+      // then missing/0/malformed by AppID asc (10, 1145350, 1245620)
+      const page1 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', offset: 0, limit: 2, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(page1.total).toBe(6);
+      expect(page1.has_more).toBe(true);
+      expect(page1.games.map((g) => g.appid)).toEqual([1091500, 1086940]);
+      expect(page1.games[0]).toMatchObject({
+        appid: 1091500,
+        name: 'Cyberpunk 2077',
+        playtime_forever: 1200,
+      });
+
+      const page2 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', offset: 2, limit: 4, include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(page2.total).toBe(6);
+      expect(page2.has_more).toBe(false);
+      expect(page2.metadata_status).toBe('skipped');
+      expect(page2.games.map((g) => g.appid)).toEqual([1145360, 10, 1145350, 1245620]);
+
+      const badSort = await client.callTool({
+        name: 'list_owned_games',
+        arguments: { sort_by: 'playtime' } as never,
+      });
+      expect(badSort.isError).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('supports list_owned_games sort_by playtime_asc and playtime_desc with pagination over real stdio', async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ['--import', PRELOAD_SCRIPT, DIST_ENTRY],
+      env: {
+        PATH: process.env['PATH'] ?? '',
+        STEAM_API_KEY: TEST_STEAM_API_KEY,
+        STEAM_ID: TEST_STEAM_ID,
+        STEAM_COUNTRY: 'US',
+        STEAM_LANGUAGE: 'english',
+        E2E_MOCK_MODE: 'owned_sort_playtime',
+      },
+      stderr: 'pipe',
+    });
+
+    const client = new Client({ name: 'stdio-e2e-playtime-sort-client', version: '0.1.0' });
+    await client.connect(transport);
+    try {
+      // playtime_asc: 10 (0), tie 300 (1086940 < 1145360), 1091500 (deduped 1200),
+      // then missing playtime by AppID asc (1145350, 1245620)
+      const ascPage1 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_asc', offset: 0, limit: 2, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(ascPage1.total).toBe(6);
+      expect(ascPage1.has_more).toBe(true);
+      expect(ascPage1.metadata_status).toBe('complete');
+      expect(ascPage1.games.map((g) => [g.appid, g.name, g.playtime_forever])).toEqual([
+        [10, 'Signal', 0],
+        [1086940, "Baldur's Gate 3", 300],
+      ]);
+
+      const ascPage2 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_asc', offset: 2, limit: 4, include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(ascPage2.total).toBe(6);
+      expect(ascPage2.has_more).toBe(false);
+      expect(ascPage2.metadata_status).toBe('skipped');
+      expect(ascPage2.games.map((g) => [g.appid, g.playtime_forever])).toEqual([
+        [1145360, 300],
+        [1091500, 1200],
+        [1145350, null],
+        [1245620, null],
+      ]);
+
+      // playtime_desc: 1091500 (1200), tie 300 (1086940 < 1145360), 10 (0),
+      // then missing playtime by AppID asc (1145350, 1245620)
+      const descPage1 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_desc', offset: 0, limit: 2, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(descPage1.total).toBe(6);
+      expect(descPage1.has_more).toBe(true);
+      expect(descPage1.metadata_status).toBe('complete');
+      expect(descPage1.games.map((g) => [g.appid, g.name, g.playtime_forever])).toEqual([
+        [1091500, 'Cyberpunk 2077', 1200],
+        [1086940, "Baldur's Gate 3", 300],
+      ]);
+
+      const descPage2 = ListOwnedGamesOutputSchema.parse(
+        checkToolPayload(
+          (await client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_desc', offset: 2, limit: 4, include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(descPage2.total).toBe(6);
+      expect(descPage2.has_more).toBe(false);
+      expect(descPage2.metadata_status).toBe('skipped');
+      expect(descPage2.games.map((g) => [g.appid, g.playtime_forever])).toEqual([
+        [1145360, 300],
+        [10, 0],
+        [1145350, null],
+        [1245620, null],
+      ]);
     } finally {
       await client.close();
     }

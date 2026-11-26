@@ -46,6 +46,26 @@ function jsonResp(body: unknown, status = 200): Response {
   });
 }
 
+function mockOwnedSortMetadata(appids: readonly number[]): Response {
+  return jsonResp({
+    response: {
+      store_items: appids.map((appid) =>
+        appid === 400
+          ? { item_type: 0, id: appid, appid: 0, success: 15, visible: false, name: '' }
+          : {
+              item_type: 0,
+              id: appid,
+              appid,
+              success: 1,
+              visible: true,
+              type: 0,
+              name: `Meta ${appid}`,
+            },
+      ),
+    },
+  });
+}
+
 async function connectInMemory(
   fetchHandler: (url: URL, init?: RequestInit) => Response | Promise<Response>,
   options?: {
@@ -181,6 +201,364 @@ describe('MCP tools integration, 50-item batching, and failure isolation', () =>
         expect(tool.annotations?.readOnlyHint).toBe(true);
         expect(tool.outputSchema).toBeDefined();
       }
+
+      const byName = new Map(tools.map((t) => [t.name, t]));
+      const ownedProps = byName.get('list_owned_games')?.inputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const ownedRequired = (byName.get('list_owned_games')?.inputSchema.required ?? []) as string[];
+      expect(ownedRequired).not.toContain('sort_by');
+      expect(ownedProps['sort_by']).toMatchObject({
+        type: 'string',
+        enum: ['appid', 'last_played', 'playtime_asc', 'playtime_desc'],
+        default: 'appid',
+      });
+      const sortDesc = String(ownedProps['sort_by']?.['description'] ?? '');
+      expect(sortDesc).toMatch(/last-played/i);
+      expect(sortDesc).toMatch(/playtime_asc/);
+      expect(sortDesc).toMatch(/playtime_desc/);
+      expect(sortDesc).toMatch(/minutes/i);
+      expect(sortDesc).toMatch(/shortest to longest/i);
+      expect(sortDesc).toMatch(/longest to shortest/i);
+      expect(sortDesc).toMatch(/\b0\b/);
+      expect(sortDesc).toMatch(/missing\/null/i);
+      expect(sortDesc).toMatch(/AppID ascending/i);
+      expect(String(byName.get('list_owned_games')?.description ?? '')).toMatch(/playtime_asc/);
+      expect(String(byName.get('list_owned_games')?.description ?? '')).toMatch(/playtime_desc/);
+
+      for (const otherTool of ['list_wishlist_games', 'resolve_game', 'get_game_status', 'get_games_status']) {
+        const props = byName.get(otherTool)?.inputSchema.properties as Record<string, unknown>;
+        expect(props['sort_by'], `${otherTool} must not expose sort_by`).toBeUndefined();
+      }
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it('supports list_owned_games sort_by appid/last_played with ties, missing/malformed timestamps, dedup merge, pagination, and page-only metadata', async () => {
+    const ownedPayload = {
+      response: {
+        game_count: 16,
+        games: [
+          { appid: 500, name: 'Tie High AppID', playtime_forever: 10, rtime_last_played: 1_700_000_500 },
+          { appid: 200, name: 'Tie Low AppID', playtime_forever: 9999, rtime_last_played: 1_700_000_500 },
+          { appid: 900, name: 'Uint32 Max Played', playtime_forever: 5, rtime_last_played: 4_294_967_295 },
+          { appid: 400, name: 'Dup Primary Name', playtime_forever: 120, rtime_last_played: 1_700_000_100 },
+          { appid: 400, name: 'Dup Secondary Name', playtime_forever: 999, rtime_last_played: 1_700_000_800 },
+          { appid: 300, name: 'Dup Null Then Valid', playtime_forever: 50 },
+          { appid: 300, name: 'Dup Ignored Name', playtime_forever: 77, rtime_last_played: 1 },
+          { appid: 100, name: 'Zero Last Played', playtime_forever: 80_000, rtime_last_played: 0 },
+          { appid: 250, name: 'Negative Last Played', playtime_forever: 50_000, rtime_last_played: -10 },
+          { appid: 600, name: 'Decimal Last Played', playtime_forever: 40_000, rtime_last_played: 1_700_000_999.5 },
+          { appid: 700, name: 'Overflow Last Played', playtime_forever: 30_000, rtime_last_played: 4_294_967_296 },
+          { appid: 800, name: 'String Last Played', playtime_forever: 20_000, rtime_last_played: '1700000999' },
+          { appid: 850, name: 'Object Last Played', playtime_forever: 15_000, rtime_last_played: { sec: 1_700_000_999 } },
+          { appid: 875, name: 'Null Last Played', playtime_forever: 12_000, rtime_last_played: null },
+          { appid: 880, name: 'Missing Last Played', playtime_forever: 11_000 },
+          { appid: 890, name: 'Boolean Last Played', playtime_forever: 10_000, rtime_last_played: true },
+        ],
+      },
+    };
+
+    const conn = await connectInMemory(
+      defaultMockRouter({
+        ownedResponse: () => jsonResp(ownedPayload),
+        getItemsResponse: mockOwnedSortMetadata,
+      }),
+    );
+
+    const expectedAppIdOrder = [100, 200, 250, 300, 400, 500, 600, 700, 800, 850, 875, 880, 890, 900];
+    const expectedLastPlayedOrder = [900, 400, 200, 500, 300, 100, 250, 600, 700, 800, 850, 875, 880, 890];
+
+    try {
+      // 1. Default omitted sort_by -> AppID ascending, exact existing output fields, zero GetItems when include_metadata=false
+      const defaultRes = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(defaultRes.total).toBe(14);
+      expect(defaultRes.games.map((g) => g.appid)).toEqual(expectedAppIdOrder);
+      expect(Object.keys(defaultRes.games[0]!).sort()).toEqual([
+        'app_type',
+        'appid',
+        'name',
+        'playtime_forever',
+        'requested_language',
+        'store_url',
+      ]);
+      expect(conn.counts.getItems).toBe(0);
+
+      // 2. Explicit sort_by='appid' matches default
+      const explicitAppId = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'appid', include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(explicitAppId.games.map((g) => g.appid)).toEqual(expectedAppIdOrder);
+      expect(conn.counts.getItems).toBe(0);
+
+      // 3. sort_by='last_played' with include_metadata=false -> full descending order, ties by AppID asc, missing/malformed last, zero GetItems
+      const fullLastPlayed = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(fullLastPlayed.total).toBe(14);
+      expect(fullLastPlayed.metadata_status).toBe('skipped');
+      expect(fullLastPlayed.games.map((g) => g.appid)).toEqual(expectedLastPlayedOrder);
+      expect(fullLastPlayed.games.find((g) => g.appid === 400)?.playtime_forever).toBe(120);
+      expect(fullLastPlayed.games.find((g) => g.appid === 300)?.playtime_forever).toBe(50);
+      expect(conn.counts.getItems).toBe(0);
+
+      // 4. Cross-page pagination after sorting with include_metadata=true -> GetItems ONLY requests selected page AppIDs
+      const page1 = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', offset: 0, limit: 3, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(page1.total).toBe(14);
+      expect(page1.returned).toBe(3);
+      expect(page1.has_more).toBe(true);
+      expect(page1.games.map((g) => g.appid)).toEqual([900, 400, 200]);
+      // Duplicate 400 falls back to first-entry native name when GetItems has no metadata for it
+      expect(page1.games[1]).toMatchObject({
+        appid: 400,
+        name: 'Dup Primary Name',
+        playtime_forever: 120,
+      });
+
+      const page2 = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', offset: 3, limit: 3, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(page2.total).toBe(14);
+      expect(page2.returned).toBe(3);
+      expect(page2.has_more).toBe(true);
+      expect(page2.games.map((g) => g.appid)).toEqual([500, 300, 100]);
+
+      const tailPage = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'last_played', offset: 12, limit: 5, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(tailPage.total).toBe(14);
+      expect(tailPage.returned).toBe(2);
+      expect(tailPage.has_more).toBe(false);
+      expect(tailPage.games.map((g) => g.appid)).toEqual([880, 890]);
+
+      expect(conn.getItemsCalls.map((c) => c.ids)).toEqual([
+        [900, 400, 200],
+        [500, 300, 100],
+        [880, 890],
+      ]);
+      // Exactly 1 GetOwnedGames per list_owned_games call (6 calls above)
+      expect(conn.counts.owned).toBe(6);
+
+      // 5. Invalid sort_by value rejected by schema validation
+      const invalidSort = await conn.client.callTool({
+        name: 'list_owned_games',
+        arguments: { sort_by: 'playtime' } as never,
+      });
+      expect(invalidSort.isError).toBe(true);
+
+      // 6. list_wishlist_games still uses priority order unchanged
+      const wl = ListWishlistGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_wishlist_games',
+            arguments: { include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(wl.games.map((g) => g.appid)).toEqual([413150, 400, 1086940, 999999999, 1245620]);
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it('supports list_owned_games sort_by playtime_asc and playtime_desc with zero, missing, ties, dedup merge, pagination, and page-only metadata', async () => {
+    const ownedPayload = {
+      response: {
+        game_count: 14,
+        games: [
+          { appid: 600, name: 'Zero High', playtime_forever: 0, rtime_last_played: 1_700_000_100 },
+          { appid: 150, name: 'Zero Low', playtime_forever: 0, rtime_last_played: 1_700_000_200 },
+          { appid: 400, name: 'Dup Zero Primary', playtime_forever: 0 },
+          { appid: 400, name: 'Dup Zero Secondary', playtime_forever: 9999 },
+          { appid: 100, name: 'One Minute', playtime_forever: 1 },
+          { appid: 500, name: 'Tie 120 High', playtime_forever: 120 },
+          { appid: 200, name: 'Tie 120 Low', playtime_forever: 120 },
+          { appid: 300, name: 'Dup Null Primary' },
+          { appid: 300, name: 'Dup Null Secondary', playtime_forever: 120 },
+          { appid: 450, name: 'Dup Keep First', playtime_forever: 250 },
+          { appid: 450, name: 'Dup Ignore Second', playtime_forever: 50 },
+          { appid: 900, name: 'Longest Played', playtime_forever: 5000 },
+          { appid: 700, name: 'Missing High' },
+          { appid: 350, name: 'Missing Low' },
+        ],
+      },
+    };
+
+    const conn = await connectInMemory(
+      defaultMockRouter({
+        ownedResponse: () => jsonResp(ownedPayload),
+        getItemsResponse: mockOwnedSortMetadata,
+      }),
+    );
+
+    const expectedPlaytimeAsc = [150, 400, 600, 100, 200, 300, 500, 450, 900, 350, 700];
+    const expectedPlaytimeDesc = [900, 450, 200, 300, 500, 100, 150, 400, 600, 350, 700];
+
+    try {
+      // 1. playtime_asc full order with include_metadata=false -> 0 first, positive asc, missing last, AppID asc ties, 0 GetItems
+      const fullAsc = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_asc', include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(fullAsc.total).toBe(11);
+      expect(fullAsc.returned).toBe(11);
+      expect(fullAsc.has_more).toBe(false);
+      expect(fullAsc.metadata_status).toBe('skipped');
+      expect(fullAsc.requested_language).toBeNull();
+      expect(fullAsc.games.map((g) => g.appid)).toEqual(expectedPlaytimeAsc);
+      expect(fullAsc.games.map((g) => g.playtime_forever)).toEqual([
+        0, 0, 0, 1, 120, 120, 120, 250, 5000, null, null,
+      ]);
+      expect(Object.keys(fullAsc.games[0]!).sort()).toEqual([
+        'app_type',
+        'appid',
+        'name',
+        'playtime_forever',
+        'requested_language',
+        'store_url',
+      ]);
+      expect(conn.counts.getItems).toBe(0);
+
+      // 2. playtime_desc full order with include_metadata=false -> longest first, 0 valid before missing, missing last, AppID asc ties, 0 GetItems
+      const fullDesc = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_desc', include_metadata: false },
+          })) as never,
+        ),
+      );
+      expect(fullDesc.total).toBe(11);
+      expect(fullDesc.returned).toBe(11);
+      expect(fullDesc.has_more).toBe(false);
+      expect(fullDesc.metadata_status).toBe('skipped');
+      expect(fullDesc.games.map((g) => g.appid)).toEqual(expectedPlaytimeDesc);
+      expect(fullDesc.games.map((g) => g.playtime_forever)).toEqual([
+        5000, 250, 120, 120, 120, 1, 0, 0, 0, null, null,
+      ]);
+      expect(conn.counts.getItems).toBe(0);
+
+      // 3. Paginated playtime_asc with include_metadata=true -> enriches ONLY selected page + native fallback on missing GetItems
+      const ascPage1 = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_asc', offset: 0, limit: 3, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(ascPage1.total).toBe(11);
+      expect(ascPage1.returned).toBe(3);
+      expect(ascPage1.offset).toBe(0);
+      expect(ascPage1.limit).toBe(3);
+      expect(ascPage1.has_more).toBe(true);
+      expect(ascPage1.metadata_status).toBe('partial');
+      expect(ascPage1.games.map((g) => g.appid)).toEqual([150, 400, 600]);
+      expect(ascPage1.games[1]).toMatchObject({
+        appid: 400,
+        name: 'Dup Zero Primary',
+        playtime_forever: 0,
+      });
+
+      const ascTail = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_asc', offset: 9, limit: 5, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(ascTail.total).toBe(11);
+      expect(ascTail.returned).toBe(2);
+      expect(ascTail.has_more).toBe(false);
+      expect(ascTail.metadata_status).toBe('complete');
+      expect(ascTail.games.map((g) => [g.appid, g.name, g.playtime_forever])).toEqual([
+        [350, 'Meta 350', null],
+        [700, 'Meta 700', null],
+      ]);
+
+      // 4. Paginated playtime_desc with include_metadata=true -> enriches ONLY selected page
+      const descPage2 = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_desc', offset: 1, limit: 3, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(descPage2.total).toBe(11);
+      expect(descPage2.returned).toBe(3);
+      expect(descPage2.has_more).toBe(true);
+      expect(descPage2.games.map((g) => [g.appid, g.playtime_forever])).toEqual([
+        [450, 250],
+        [200, 120],
+        [300, 120],
+      ]);
+
+      const descTail = ListOwnedGamesOutputSchema.parse(
+        assertStructuredMatchesText(
+          (await conn.client.callTool({
+            name: 'list_owned_games',
+            arguments: { sort_by: 'playtime_desc', offset: 8, limit: 5, include_metadata: true },
+          })) as never,
+        ),
+      );
+      expect(descTail.total).toBe(11);
+      expect(descTail.returned).toBe(3);
+      expect(descTail.has_more).toBe(false);
+      expect(descTail.games.map((g) => [g.appid, g.playtime_forever])).toEqual([
+        [600, 0],
+        [350, null],
+        [700, null],
+      ]);
+
+      expect(conn.getItemsCalls.map((c) => c.ids)).toEqual([
+        [150, 400, 600],
+        [350, 700],
+        [450, 200, 300],
+        [600, 350, 700],
+      ]);
+      expect(conn.counts.owned).toBe(6);
     } finally {
       await conn.close();
     }

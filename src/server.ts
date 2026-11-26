@@ -12,6 +12,7 @@ import {
   GetGamesStatusInputSchema,
   GetGamesStatusOutputSchema,
   ListGamesInputSchema,
+  ListOwnedGamesInputSchema,
   ListOwnedGamesOutputSchema,
   ListWishlistGamesOutputSchema,
   ResolveGameOutputSchema,
@@ -176,8 +177,8 @@ export function createSteamCollectionServer(
     {
       title: 'List Owned Steam Games',
       description:
-        'Fetches the configured Steam account owned games live from Steam (no cross-call cache), deduplicates and sorts by AppID ascending, and returns one local page (default offset=0, limit=100, max 500). Enriches only the current page via GetItems when include_metadata=true; set include_metadata=false to skip GetItems. Note: cross-page calls refresh live data with no snapshot guarantee; deduplicate by appid if paginating. For checking specific games, prefer get_games_status (batch) or get_game_status.',
-      inputSchema: ListGamesInputSchema,
+        'Fetches the configured Steam account owned games live from Steam (no cross-call cache), deduplicates and sorts the full library (sort_by="appid" ascending by default; "last_played" by last-played time newest to oldest—not total playtime or completion time; "playtime_asc" or "playtime_desc" by cumulative playtime_forever in minutes shortest to longest or longest to shortest, where 0 is valid; missing sort values are placed last in all modes with AppID ascending tie-break), and returns one local page (default offset=0, limit=100, max 500). Enriches only the current page via GetItems when include_metadata=true; set include_metadata=false to skip GetItems. Note: cross-page calls refresh live data with no snapshot guarantee; deduplicate by appid if paginating. For checking specific games, prefer get_games_status (batch) or get_game_status.',
+      inputSchema: ListOwnedGamesInputSchema,
       outputSchema: ListOwnedGamesOutputSchema,
       annotations: READ_ONLY_ANNOTATIONS,
     },

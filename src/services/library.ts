@@ -10,7 +10,7 @@ import type { DataStatus, ErrorCode } from '../schemas.js';
 import type { SteamLanguage } from '../utils/languages.js';
 
 export interface OwnedListData {
-  readonly games: OwnedGameRecord[];
+  readonly games: readonly OwnedGameRecord[];
   readonly appidSet: Set<number>;
   readonly gameCount: number;
 }
@@ -483,6 +483,12 @@ export interface PageResult<T> {
   readonly items: T[];
 }
 
+function mergeLastPlayedAt(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
+}
+
 export function deduplicateAndSortOwned(records: readonly OwnedGameRecord[]): OwnedGameRecord[] {
   const byAppId = new Map<number, OwnedGameRecord>();
   for (const record of records) {
@@ -494,10 +500,47 @@ export function deduplicateAndSortOwned(records: readonly OwnedGameRecord[]): Ow
         appid: existing.appid,
         name: existing.name ?? record.name,
         playtimeForever: existing.playtimeForever ?? record.playtimeForever,
+        lastPlayedAt: mergeLastPlayedAt(existing.lastPlayedAt, record.lastPlayedAt),
       });
     }
   }
   return [...byAppId.values()].sort((a, b) => a.appid - b.appid);
+}
+
+function compareOwnedMetricNullsLast(
+  aValue: number | null,
+  bValue: number | null,
+  direction: 'asc' | 'desc',
+  aAppId: number,
+  bAppId: number,
+): number {
+  if (aValue === bValue) return aAppId - bAppId;
+  if (aValue === null) return 1;
+  if (bValue === null) return -1;
+  return direction === 'asc' ? aValue - bValue : bValue - aValue;
+}
+
+export function sortOwnedGamesByLastPlayed(
+  records: readonly OwnedGameRecord[],
+): OwnedGameRecord[] {
+  return [...records].sort((a, b) =>
+    compareOwnedMetricNullsLast(a.lastPlayedAt, b.lastPlayedAt, 'desc', a.appid, b.appid),
+  );
+}
+
+export function sortOwnedGamesByPlaytime(
+  records: readonly OwnedGameRecord[],
+  direction: 'asc' | 'desc',
+): OwnedGameRecord[] {
+  return [...records].sort((a, b) =>
+    compareOwnedMetricNullsLast(
+      a.playtimeForever,
+      b.playtimeForever,
+      direction,
+      a.appid,
+      b.appid,
+    ),
+  );
 }
 
 export function deduplicateAndSortWishlist(records: readonly WishlistRecord[]): WishlistRecord[] {

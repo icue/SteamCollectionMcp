@@ -63,6 +63,38 @@ globalThis.fetch = async (input, init) => {
     if (mode === 'mixed_partial_search') {
       return jsonResponse({ response: { game_count: 0, games: [] } });
     }
+    if (mode === 'owned_sort') {
+      return jsonResponse({
+        response: {
+          game_count: 7,
+          games: [
+            { appid: 1091500, name: 'Cyberpunk 2077', playtime_forever: 1200, rtime_last_played: 1700000100 },
+            { appid: 1145360, name: 'Hades', playtime_forever: 300, rtime_last_played: 1700000500 },
+            { appid: 1086940, name: "Baldur's Gate 3", playtime_forever: 500, rtime_last_played: 1700000500 },
+            { appid: 1091500, name: 'Cyberpunk Duplicate', playtime_forever: 9999, rtime_last_played: 1700000900 },
+            { appid: 1245620, name: 'ELDEN RING', playtime_forever: 4000, rtime_last_played: 0 },
+            { appid: 1145350, name: 'Hades II', playtime_forever: 2000, rtime_last_played: 'invalid' },
+            { appid: 10, name: 'Signal', playtime_forever: 100 },
+          ],
+        },
+      });
+    }
+    if (mode === 'owned_sort_playtime') {
+      return jsonResponse({
+        response: {
+          game_count: 7,
+          games: [
+            { appid: 1091500, name: 'Cyberpunk 2077', playtime_forever: 1200 },
+            { appid: 1091500, name: 'Cyberpunk Duplicate', playtime_forever: 9999 },
+            { appid: 1145360, name: 'Hades', playtime_forever: 300 },
+            { appid: 1086940, name: "Baldur's Gate 3", playtime_forever: 300 },
+            { appid: 10, name: 'Signal', playtime_forever: 0 },
+            { appid: 1245620, name: 'ELDEN RING' },
+            { appid: 1145350, name: 'Hades II' },
+          ],
+        },
+      });
+    }
     return jsonResponse({
       response: {
         game_count: 2,

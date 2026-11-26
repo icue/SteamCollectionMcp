@@ -65,6 +65,14 @@ export type MatchSource = z.infer<typeof MatchSourceSchema>;
 
 export const PositiveUint32Schema = z.number().int().min(1).max(UINT32_MAX);
 
+export const OwnedGamesSortBySchema = z.enum([
+  'appid',
+  'last_played',
+  'playtime_asc',
+  'playtime_desc',
+]);
+export type OwnedGamesSortBy = z.infer<typeof OwnedGamesSortBySchema>;
+
 // --- Upstream Steam API Response Schemas ---
 
 export const UpstreamOwnedGameItemSchema = z
@@ -72,6 +80,7 @@ export const UpstreamOwnedGameItemSchema = z
     appid: PositiveUint32Schema,
     name: z.string().optional(),
     playtime_forever: z.number().int().min(0).optional(),
+    rtime_last_played: PositiveUint32Schema.nullish().catch(null),
   })
   .passthrough();
 
@@ -218,6 +227,12 @@ export const ListGamesInputSchema = z.object({
     ),
 });
 export type ListGamesInput = z.infer<typeof ListGamesInputSchema>;
+
+export const ListOwnedGamesInputSchema = ListGamesInputSchema.extend({
+  sort_by: OwnedGamesSortBySchema.default('appid').describe(
+    'Sort order across the full deduplicated owned library before pagination. "appid" (default) sorts by AppID ascending. "last_played" sorts by last-played time from newest to oldest (not total playtime or completion time), placing games without a valid last-played timestamp last and breaking ties by AppID ascending. "playtime_asc" and "playtime_desc" sort by cumulative playtime (playtime_forever, in minutes) from shortest to longest and longest to shortest respectively; 0 is a valid playtime, missing/null playtime is placed last in both directions, and ties (including among missing values) are broken by AppID ascending.',
+  ),
+});
 
 export const GetGamesStatusInputSchema = z.object({
   queries: z
